@@ -1,6 +1,8 @@
 import { Command } from 'commander';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
     CallToolRequestSchema,
     ErrorCode,
@@ -27,11 +29,15 @@ import { deleteAuthUserTool } from './tools/delete_auth_user.js';
 import { createAuthUserTool } from './tools/create_auth_user.js';
 import { updateAuthUserTool } from './tools/update_auth_user.js';
 import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { ToolContext } from './tools/types.js';
 import listStorageBucketsTool from './tools/list_storage_buckets.js';
 import listStorageObjectsTool from './tools/list_storage_objects.js';
 import listRealtimePublicationsTool from './tools/list_realtime_publications.js';
+
+// Express for SSE mode
+import express from 'express';
+import cors from 'cors';
+import crypto from 'node:crypto';
 
 // Node.js built-in modules
 import * as fs from 'node:fs';
@@ -41,18 +47,104 @@ import * as path from 'node:path';
 interface McpToolSchema {
     name: string;
     description?: string;
-    // inputSchema is the JSON Schema object for MCP capabilities
-    inputSchema: object; 
+    inputSchema: object;
 }
 
-// Base structure for our tool objects - For Reference
+// Base structure for our tool objects
 interface AppTool {
     name: string;
     description: string;
-    inputSchema: z.ZodTypeAny; // Zod schema for parsing
-    mcpInputSchema: object;    // Static JSON schema for MCP (Required)
-    outputSchema: z.ZodTypeAny; // Zod schema for output (optional)
+    inputSchema: z.ZodTypeAny;
+    mcpInputSchema: object;
+    outputSchema: z.ZodTypeAny;
     execute: (input: unknown, context: ToolContext) => Promise<unknown>;
+}
+
+// Session storage for SSE mode
+const sessions = new Map<string, { server: Server; transport: SSEServerTransport }>();
+
+// Session storage for HTTP Streamable mode
+const httpSessions = new Map<string, { server: Server; transport: StreamableHTTPServerTransport }>();
+
+// Create MCP Server with tools
+function createMcpServer(
+    registeredTools: Record<string, AppTool>,
+    availableTools: Record<string, AppTool>,
+    capabilities: { tools: Record<string, McpToolSchema> },
+    selfhostedClient: SelfhostedSupabaseClient,
+    workspacePath: string
+): Server {
+    const server = new Server(
+        {
+            name: 'self-hosted-supabase-mcp',
+            version: '1.0.0',
+        },
+        {
+            capabilities,
+        },
+    );
+
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
+        tools: Object.values(capabilities.tools),
+    }));
+
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+        const toolName = request.params.name;
+        const tool = registeredTools[toolName as keyof typeof registeredTools];
+
+        if (!tool) {
+            if (availableTools[toolName as keyof typeof availableTools]) {
+                throw new McpError(ErrorCode.MethodNotFound, `Tool "${toolName}" is available but not enabled.`);
+            }
+            throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
+        }
+
+        try {
+            if (typeof tool.execute !== 'function') {
+                throw new Error(`Tool ${toolName} does not have an execute method.`);
+            }
+
+            let parsedArgs = request.params.arguments;
+            if (tool.inputSchema && typeof tool.inputSchema.parse === 'function') {
+                parsedArgs = (tool.inputSchema as z.ZodTypeAny).parse(request.params.arguments);
+            }
+
+            const context: ToolContext = {
+                selfhostedClient,
+                workspacePath,
+                log: (message, level = 'info') => {
+                    console.error(`[${level.toUpperCase()}] ${message}`);
+                }
+            };
+
+            const result = await tool.execute(parsedArgs as unknown, context);
+
+            return {
+                content: [
+                    {
+                        type: 'text',
+                        text: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
+                    },
+                ],
+            };
+        } catch (error: unknown) {
+            console.error(`Error executing tool ${toolName}:`, error);
+            let errorMessage = `Error executing tool ${toolName}: `;
+            if (error instanceof z.ZodError) {
+                errorMessage += `Input validation failed: ${error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', ')}`;
+            } else if (error instanceof Error) {
+                errorMessage += error.message;
+            } else {
+                errorMessage += String(error);
+            }
+            return {
+                content: [{ type: 'text', text: errorMessage }],
+                isError: true,
+            };
+        }
+    });
+
+    return server;
 }
 
 // Main function
@@ -65,10 +157,12 @@ async function main() {
         .option('--url <url>', 'Supabase project URL', process.env.SUPABASE_URL)
         .option('--anon-key <key>', 'Supabase anonymous key', process.env.SUPABASE_ANON_KEY)
         .option('--service-key <key>', 'Supabase service role key (optional)', process.env.SUPABASE_SERVICE_ROLE_KEY)
-        .option('--db-url <url>', 'Direct database connection string (optional, for pg fallback)', process.env.DATABASE_URL)
-        .option('--jwt-secret <secret>', 'Supabase JWT secret (optional, needed for some tools)', process.env.SUPABASE_AUTH_JWT_SECRET)
-        .option('--workspace-path <path>', 'Workspace root path (for file operations)', process.cwd())
-        .option('--tools-config <path>', 'Path to a JSON file specifying which tools to enable (e.g., { "enabledTools": ["tool1", "tool2"] }). If omitted, all tools are enabled.')
+        .option('--db-url <url>', 'Direct database connection string (optional)', process.env.DATABASE_URL)
+        .option('--jwt-secret <secret>', 'Supabase JWT secret (optional)', process.env.SUPABASE_AUTH_JWT_SECRET)
+        .option('--workspace-path <path>', 'Workspace root path', process.cwd())
+        .option('--tools-config <path>', 'Path to tools config JSON file')
+        .option('--sse', 'Run in SSE mode instead of stdio', false)
+        .option('--port <port>', 'Port for SSE mode', process.env.PORT || '3000')
         .parse(process.argv);
 
     const options = program.opts();
@@ -95,8 +189,7 @@ async function main() {
 
         console.error('Supabase client initialized successfully.');
 
-        const availableTools = {
-            // Cast here assumes tools will implement AppTool structure
+        const availableTools: Record<string, AppTool> = {
             [listTablesTool.name]: listTablesTool as AppTool,
             [listExtensionsTool.name]: listExtensionsTool as AppTool,
             [listMigrationsTool.name]: listMigrationsTool as AppTool,
@@ -120,15 +213,15 @@ async function main() {
             [listRealtimePublicationsTool.name]: listRealtimePublicationsTool as AppTool,
         };
 
-        // --- Tool Filtering Logic ---
-        let registeredTools: Record<string, AppTool> = { ...availableTools }; // Start with all tools
+        // Tool filtering logic
+        let registeredTools: Record<string, AppTool> = { ...availableTools };
         const toolsConfigPath = options.toolsConfig as string | undefined;
-        let enabledToolNames: Set<string> | null = null; // Use Set for efficient lookup
+        let enabledToolNames: Set<string> | null = null;
 
         if (toolsConfigPath) {
             try {
                 const resolvedPath = path.resolve(toolsConfigPath);
-                console.error(`Attempting to load tool configuration from: ${resolvedPath}`);
+                console.error(`Loading tool configuration from: ${resolvedPath}`);
                 if (!fs.existsSync(resolvedPath)) {
                     throw new Error(`Tool configuration file not found at ${resolvedPath}`);
                 }
@@ -136,59 +229,37 @@ async function main() {
                 const configJson = JSON.parse(configFileContent);
 
                 if (!configJson || typeof configJson !== 'object' || !Array.isArray(configJson.enabledTools)) {
-                     throw new Error('Invalid config file format. Expected { "enabledTools": ["tool1", ...] }.');
+                    throw new Error('Invalid config format. Expected { "enabledTools": ["tool1", ...] }.');
                 }
 
-                // Validate that enabledTools contains only strings
                 const toolNames = configJson.enabledTools as unknown[];
                 if (!toolNames.every((name): name is string => typeof name === 'string')) {
-                    throw new Error('Invalid config file content. "enabledTools" must be an array of strings.');
+                    throw new Error('"enabledTools" must be an array of strings.');
                 }
 
                 enabledToolNames = new Set(toolNames.map(name => name.trim()).filter(name => name.length > 0));
-
             } catch (error: unknown) {
-                console.error(`Error loading or parsing tool config file '${toolsConfigPath}':`, error instanceof Error ? error.message : String(error));
-                console.error('Falling back to enabling all tools due to config error.');
-                enabledToolNames = null; // Reset to null to signify fallback
+                console.error(`Error loading tool config:`, error instanceof Error ? error.message : String(error));
+                enabledToolNames = null;
             }
         }
 
-        if (enabledToolNames !== null) { // Check if we successfully got names from config
-            console.error(`Whitelisting tools based on config: ${Array.from(enabledToolNames).join(', ')}`);
-
-            registeredTools = {}; // Reset and add only whitelisted tools
+        if (enabledToolNames !== null) {
+            console.error(`Whitelisting tools: ${Array.from(enabledToolNames).join(', ')}`);
+            registeredTools = {};
             for (const toolName in availableTools) {
                 if (enabledToolNames.has(toolName)) {
                     registeredTools[toolName] = availableTools[toolName];
-                } else {
-                    console.error(`Tool ${toolName} disabled (not in config whitelist).`);
-                }
-            }
-
-            // Check if any tools specified in the config were not found in availableTools
-            for (const requestedName of enabledToolNames) {
-                if (!availableTools[requestedName]) {
-                    console.warn(`Warning: Tool "${requestedName}" specified in config file not found.`);
                 }
             }
         } else {
-            console.error("No valid --tools-config specified or error loading config, enabling all available tools.");
-            // registeredTools already defaults to all tools, so no action needed here
+            console.error("Enabling all available tools.");
         }
-        // --- End Tool Filtering Logic ---
 
-        // Prepare capabilities for the Server constructor
+        // Prepare capabilities
         const capabilitiesTools: Record<string, McpToolSchema> = {};
-        // Use the potentially filtered 'registeredTools' map
         for (const tool of Object.values(registeredTools)) {
-            // Directly use mcpInputSchema - assumes it exists and is correct
             const staticInputSchema = tool.mcpInputSchema || { type: 'object', properties: {} };
-
-            if (!tool.mcpInputSchema) { // Simple check if it was actually provided
-                 console.error(`Tool ${tool.name} is missing mcpInputSchema. Using default empty schema.`);
-            }
-
             capabilitiesTools[tool.name] = {
                 name: tool.name,
                 description: tool.description || 'Tool description missing',
@@ -198,98 +269,391 @@ async function main() {
 
         const capabilities = { tools: capabilitiesTools };
 
-        console.error('Initializing MCP Server...');
-        const server = new Server(
-            {
-                name: 'self-hosted-supabase-mcp',
-                version: '1.0.0',
-            },
-            {
-                capabilities,
-            },
-        );
+        // SSE Mode
+        if (options.sse) {
+            const port = parseInt(options.port as string, 10);
+            const app = express();
 
-        // The ListTools handler should return the array matching McpToolSchema structure
-        server.setRequestHandler(ListToolsRequestSchema, async () => ({
-            tools: Object.values(capabilities.tools),
-        }));
-
-        server.setRequestHandler(CallToolRequestSchema, async (request) => {
-            const toolName = request.params.name;
-            // Look up the tool in the filtered 'registeredTools' map
-            const tool = registeredTools[toolName as keyof typeof registeredTools];
-
-            if (!tool) {
-                // Check if it existed originally but was filtered out
-                if (availableTools[toolName as keyof typeof availableTools]) {
-                     throw new McpError(ErrorCode.MethodNotFound, `Tool "${toolName}" is available but not enabled by the current server configuration.`);
+            app.use(cors());
+            // Skip JSON parsing for MCP HTTP endpoint (StreamableHTTPServerTransport parses itself)
+            app.use((req, res, next) => {
+                if (req.path === '/' || req.path === '/http') {
+                    next();
+                } else {
+                    express.json({ limit: '50mb' })(req, res, next);
                 }
-                // If the tool wasn't in the original list either, it's unknown
-                throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
+            });
+            app.use((req, res, next) => {
+                if (req.path === '/' || req.path === '/http') {
+                    next();
+                } else {
+                    express.urlencoded({ extended: true })(req, res, next);
+                }
+            });
+
+            // API Key for authentication
+            const MCP_API_KEY = process.env.MCP_API_KEY;
+            if (!MCP_API_KEY) {
+                console.error('WARNING: MCP_API_KEY not set! Server is running WITHOUT authentication.');
+            } else {
+                console.error('MCP API Key authentication enabled.');
             }
 
-            try {
-                if (typeof tool.execute !== 'function') {
-                    throw new Error(`Tool ${toolName} does not have an execute method.`);
+            // Authentication middleware
+            const authMiddleware = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+                if (!MCP_API_KEY) {
+                    // No API key configured, allow all (with warning above)
+                    return next();
                 }
 
-                let parsedArgs = request.params.arguments;
-                // Still use Zod schema for internal validation before execution
-                if (tool.inputSchema && typeof tool.inputSchema.parse === 'function') {
-                    parsedArgs = (tool.inputSchema as z.ZodTypeAny).parse(request.params.arguments);
+                const authHeader = req.headers.authorization;
+                const apiKeyHeader = req.headers['x-api-key'];
+
+                // Check Authorization: Bearer <token>
+                if (authHeader?.startsWith('Bearer ')) {
+                    const token = authHeader.slice(7);
+                    if (token === MCP_API_KEY) {
+                        return next();
+                    }
                 }
 
-                // Create the context object using the imported type
-                const context: ToolContext = {
+                // Check X-API-Key header
+                if (apiKeyHeader === MCP_API_KEY) {
+                    return next();
+                }
+
+                console.error(`Unauthorized access attempt from ${req.ip}`);
+                res.status(401).json({ error: 'unauthorized', error_description: 'Invalid or missing API key' });
+            };
+
+            // Health check (no auth required)
+            app.get('/health', (req, res) => {
+                res.json({
+                    status: 'ok',
+                    mode: 'sse',
+                    timestamp: new Date().toISOString(),
+                    sessions: sessions.size,
+                    authenticated: !!MCP_API_KEY
+                });
+            });
+
+            // Simple OAuth server implementation for MCP auth
+            const PUBLIC_URL = process.env.MCP_PUBLIC_URL || 'https://supabase.kanduit.tech';
+            const oauthCodes = new Map<string, { clientId: string; redirectUri: string; codeChallenge?: string }>();
+
+            // OAuth Authorization Server Metadata
+            app.get('/.well-known/oauth-authorization-server', (req, res) => {
+                res.json({
+                    issuer: PUBLIC_URL,
+                    authorization_endpoint: `${PUBLIC_URL}/oauth/authorize`,
+                    token_endpoint: `${PUBLIC_URL}/oauth/token`,
+                    registration_endpoint: `${PUBLIC_URL}/register`,
+                    response_types_supported: ['code'],
+                    grant_types_supported: ['authorization_code', 'refresh_token'],
+                    code_challenge_methods_supported: ['S256'],
+                    token_endpoint_auth_methods_supported: ['none']
+                });
+            });
+            app.get('/.well-known/oauth-authorization-server/*', (req, res) => {
+                res.json({
+                    issuer: PUBLIC_URL,
+                    authorization_endpoint: `${PUBLIC_URL}/oauth/authorize`,
+                    token_endpoint: `${PUBLIC_URL}/oauth/token`,
+                    registration_endpoint: `${PUBLIC_URL}/register`,
+                    response_types_supported: ['code'],
+                    grant_types_supported: ['authorization_code', 'refresh_token'],
+                    code_challenge_methods_supported: ['S256'],
+                    token_endpoint_auth_methods_supported: ['none']
+                });
+            });
+
+            // OAuth Protected Resource Metadata
+            app.get('/.well-known/oauth-protected-resource', (req, res) => {
+                res.json({
+                    resource: `${PUBLIC_URL}/mcp`,
+                    authorization_servers: [PUBLIC_URL],
+                    bearer_methods_supported: ['header']
+                });
+            });
+            app.get('/.well-known/oauth-protected-resource/*', (req, res) => {
+                res.json({
+                    resource: `${PUBLIC_URL}/mcp`,
+                    authorization_servers: [PUBLIC_URL],
+                    bearer_methods_supported: ['header']
+                });
+            });
+
+            app.get('/.well-known/openid-configuration', (req, res) => {
+                res.status(404).json({ error: 'not_found', error_description: 'OpenID Connect not supported' });
+            });
+            app.get('/.well-known/openid-configuration/*', (req, res) => {
+                res.status(404).json({ error: 'not_found', error_description: 'OpenID Connect not supported' });
+            });
+
+            // OAuth client registration
+            app.post('/register', (req, res) => {
+                console.error('OAuth client registration:', req.body);
+                const clientId = crypto.randomUUID();
+                const redirectUris = req.body?.redirect_uris || [];
+                res.status(201).json({
+                    client_id: clientId,
+                    client_id_issued_at: Math.floor(Date.now() / 1000),
+                    token_endpoint_auth_method: 'none',
+                    redirect_uris: redirectUris,
+                    grant_types: ['authorization_code', 'refresh_token'],
+                    response_types: ['code'],
+                    scope: 'mcp'
+                });
+            });
+
+            // OAuth authorize endpoint - auto-approve and redirect
+            app.get('/oauth/authorize', (req, res) => {
+                console.error('OAuth authorize request:', req.query);
+                const { client_id, redirect_uri, state, code_challenge, code_challenge_method, response_type } = req.query;
+
+                if (response_type !== 'code') {
+                    res.status(400).json({ error: 'unsupported_response_type' });
+                    return;
+                }
+
+                // Generate authorization code
+                const code = crypto.randomUUID();
+                oauthCodes.set(code, {
+                    clientId: client_id as string,
+                    redirectUri: redirect_uri as string,
+                    codeChallenge: code_challenge as string
+                });
+
+                // Auto-approve and redirect back
+                const redirectUrl = new URL(redirect_uri as string);
+                redirectUrl.searchParams.set('code', code);
+                if (state) redirectUrl.searchParams.set('state', state as string);
+
+                console.error('Redirecting to:', redirectUrl.toString());
+                res.redirect(redirectUrl.toString());
+            });
+
+            // OAuth token endpoint
+            app.post('/oauth/token', (req, res) => {
+                console.error('OAuth token request:', req.body);
+                const { grant_type, code, code_verifier, refresh_token } = req.body;
+
+                if (grant_type === 'authorization_code') {
+                    const codeData = oauthCodes.get(code);
+                    if (!codeData) {
+                        res.status(400).json({ error: 'invalid_grant', error_description: 'Invalid authorization code' });
+                        return;
+                    }
+                    oauthCodes.delete(code);
+
+                    // Return access token (use the configured API key)
+                    res.json({
+                        access_token: MCP_API_KEY || crypto.randomUUID(),
+                        token_type: 'Bearer',
+                        expires_in: 3600,
+                        refresh_token: crypto.randomUUID()
+                    });
+                } else if (grant_type === 'refresh_token') {
+                    res.json({
+                        access_token: MCP_API_KEY || crypto.randomUUID(),
+                        token_type: 'Bearer',
+                        expires_in: 3600,
+                        refresh_token: crypto.randomUUID()
+                    });
+                } else {
+                    res.status(400).json({ error: 'unsupported_grant_type' });
+                }
+            });
+
+            // SSE endpoint (auth required)
+            app.get('/sse', authMiddleware, async (req, res) => {
+                const sessionId = crypto.randomUUID();
+                console.error(`New SSE connection: ${sessionId}`);
+
+                const server = createMcpServer(
+                    registeredTools,
+                    availableTools,
+                    capabilities,
                     selfhostedClient,
-                    workspacePath: options.workspacePath as string,
-                    log: (message, level = 'info') => {
-                        // Simple logger using console.error (consistent with existing logs)
-                        console.error(`[${level.toUpperCase()}] ${message}`);
+                    options.workspacePath as string
+                );
+
+                const transport = new SSEServerTransport(`/mcp/messages/${sessionId}`, res);
+                sessions.set(sessionId, { server, transport });
+
+                res.on('close', () => {
+                    console.error(`SSE connection closed: ${sessionId}`);
+                    sessions.delete(sessionId);
+                });
+
+                await server.connect(transport);
+            });
+
+            // Messages endpoint for SSE (auth required)
+            app.post('/messages/:sessionId', authMiddleware, async (req, res) => {
+                const { sessionId } = req.params;
+                const session = sessions.get(sessionId);
+
+                if (!session) {
+                    res.status(404).json({ error: 'not_found', error_description: 'Session not found' });
+                    return;
+                }
+
+                try {
+                    await session.transport.handlePostMessage(req, res);
+                } catch (error) {
+                    console.error(`Error handling message for session ${sessionId}:`, error);
+                    res.status(500).json({ error: 'server_error', error_description: 'Internal server error' });
+                }
+            });
+
+            // HTTP Streamable transport at root (auth required) - /mcp maps to / via Kong
+            app.post('/', authMiddleware, async (req, res) => {
+                const sessionId = req.headers['mcp-session-id'] as string | undefined;
+                console.error('New HTTP request received at /');
+                console.error('Session ID:', sessionId);
+                console.error('Content-Type:', req.headers['content-type']);
+
+                // Check for existing session
+                if (sessionId && httpSessions.has(sessionId)) {
+                    console.error('Reusing existing session:', sessionId);
+                    const session = httpSessions.get(sessionId)!;
+                    await session.transport.handleRequest(req, res);
+                    return;
+                }
+
+                // Create new session
+                console.error('Creating new HTTP session');
+                const server = createMcpServer(
+                    registeredTools,
+                    availableTools,
+                    capabilities,
+                    selfhostedClient,
+                    options.workspacePath as string
+                );
+
+                const transport = new StreamableHTTPServerTransport({
+                    sessionIdGenerator: () => crypto.randomUUID(),
+                });
+
+                // Clean up on close
+                transport.onclose = () => {
+                    const sid = transport.sessionId;
+                    if (sid) {
+                        console.error('HTTP session closed:', sid);
+                        httpSessions.delete(sid);
                     }
                 };
 
-                // Call the tool's execute method
-                // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-                const result = await tool.execute(parsedArgs as any, context);
+                await server.connect(transport);
+                await transport.handleRequest(req, res);
 
-                return {
-                    content: [
-                        {
-                            type: 'text',
-                            text: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
-                        },
-                    ],
+                // Save the session if one was created
+                const createdSessionId = transport.sessionId;
+                if (createdSessionId) {
+                    console.error('HTTP session created:', createdSessionId);
+                    httpSessions.set(createdSessionId, { server, transport });
+                }
+            });
+
+            // Also support /http for backwards compatibility
+            app.post('/http', authMiddleware, async (req, res) => {
+                const sessionId = req.headers['mcp-session-id'] as string | undefined;
+                console.error('New HTTP request received at /http');
+                console.error('Session ID:', sessionId);
+
+                // Check for existing session
+                if (sessionId && httpSessions.has(sessionId)) {
+                    console.error('Reusing existing session:', sessionId);
+                    const session = httpSessions.get(sessionId)!;
+                    await session.transport.handleRequest(req, res);
+                    return;
+                }
+
+                // Create new session
+                console.error('Creating new HTTP session');
+                const server = createMcpServer(
+                    registeredTools,
+                    availableTools,
+                    capabilities,
+                    selfhostedClient,
+                    options.workspacePath as string
+                );
+
+                const transport = new StreamableHTTPServerTransport({
+                    sessionIdGenerator: () => crypto.randomUUID(),
+                });
+
+                transport.onclose = () => {
+                    const sid = transport.sessionId;
+                    if (sid) {
+                        console.error('HTTP session closed:', sid);
+                        httpSessions.delete(sid);
+                    }
                 };
-            } catch (error: unknown) {
-                 console.error(`Error executing tool ${toolName}:`, error);
-                 let errorMessage = `Error executing tool ${toolName}: `;
-                 if (error instanceof z.ZodError) {
-                     errorMessage += `Input validation failed: ${error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', ')}`;
-                 } else if (error instanceof Error) {
-                     errorMessage += error.message;
-                 } else {
-                     errorMessage += String(error);
-                 }
-                 return {
-                    content: [{ type: 'text', text: errorMessage }],
-                    isError: true,
-                 };
-            }
-        });
 
-        console.error('Starting MCP Server in stdio mode...');
-        const transport = new StdioServerTransport();
-        await server.connect(transport);
-        console.error('MCP Server connected to stdio.');
+                await server.connect(transport);
+                await transport.handleRequest(req, res);
+
+                const createdSessionId = transport.sessionId;
+                if (createdSessionId) {
+                    console.error('HTTP session created:', createdSessionId);
+                    httpSessions.set(createdSessionId, { server, transport });
+                }
+            });
+
+            // DELETE handler for session termination
+            app.delete('/', authMiddleware, async (req, res) => {
+                const sessionId = req.headers['mcp-session-id'] as string | undefined;
+                if (sessionId && httpSessions.has(sessionId)) {
+                    const session = httpSessions.get(sessionId)!;
+                    await session.transport.handleRequest(req, res);
+                    httpSessions.delete(sessionId);
+                } else {
+                    res.status(404).json({ error: 'not_found', error_description: 'Session not found' });
+                }
+            });
+
+            // GET handler for SSE streams (if client requests it)
+            app.get('/', authMiddleware, async (req, res) => {
+                const sessionId = req.headers['mcp-session-id'] as string | undefined;
+                if (sessionId && httpSessions.has(sessionId)) {
+                    const session = httpSessions.get(sessionId)!;
+                    await session.transport.handleRequest(req, res);
+                } else {
+                    res.status(400).json({ error: 'bad_request', error_description: 'Session ID required for GET requests' });
+                }
+            });
+
+            app.listen(port, () => {
+                console.error(`MCP Server running on port ${port}`);
+                console.error(`HTTP endpoint: http://localhost:${port}/http`);
+                console.error(`SSE endpoint: http://localhost:${port}/sse`);
+                console.error(`Health check: http://localhost:${port}/health`);
+            });
+
+        } else {
+            // Stdio Mode
+            console.error('Starting MCP Server in stdio mode...');
+            const server = createMcpServer(
+                registeredTools,
+                availableTools,
+                capabilities,
+                selfhostedClient,
+                options.workspacePath as string
+            );
+            const transport = new StdioServerTransport();
+            await server.connect(transport);
+            console.error('MCP Server connected to stdio.');
+        }
 
     } catch (error) {
-        console.error('Failed to initialize or start the MCP server:', error);
-        throw error; // Rethrow to ensure the process exits non-zero if init fails
+        console.error('Failed to initialize MCP server:', error);
+        throw error;
     }
 }
 
 main().catch((error) => {
     console.error('Unhandled error in main function:', error);
-    process.exit(1); // Exit with error code
+    process.exit(1);
 });
