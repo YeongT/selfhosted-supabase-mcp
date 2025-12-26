@@ -74,11 +74,12 @@ export const createAuthUserTool = {
             // Construct the INSERT statement with parameterization
             const sql = `
                 INSERT INTO auth.users (
-                    instance_id, email, encrypted_password, role,
-                    raw_app_meta_data, raw_user_meta_data, 
-                    aud, email_confirmed_at, confirmation_sent_at -- Set required defaults
+                    id, instance_id, email, encrypted_password, role,
+                    raw_app_meta_data, raw_user_meta_data,
+                    aud, email_confirmed_at, confirmation_sent_at
                 )
                 VALUES (
+                    gen_random_uuid(),
                     COALESCE(current_setting('app.instance_id', TRUE), '00000000-0000-0000-0000-000000000000')::uuid,
                     $1, crypt($2, gen_salt('bf')),
                     $3,
