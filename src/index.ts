@@ -34,6 +34,102 @@ import listStorageBucketsTool from './tools/list_storage_buckets.js';
 import listStorageObjectsTool from './tools/list_storage_objects.js';
 import listRealtimePublicationsTool from './tools/list_realtime_publications.js';
 
+// Functions (RPC)
+import { listFunctionsTool } from './tools/list_functions.js';
+import { createFunctionTool } from './tools/create_function.js';
+import { deleteFunctionTool } from './tools/delete_function.js';
+
+// RLS Policies
+import { listPoliciesTool } from './tools/list_policies.js';
+import { createPolicyTool } from './tools/create_policy.js';
+import { deletePolicyTool } from './tools/delete_policy.js';
+import { enableRlsTool } from './tools/enable_rls.js';
+import { disableRlsTool } from './tools/disable_rls.js';
+
+// Enums
+import { listEnumsTool } from './tools/list_enums.js';
+import { createEnumTool } from './tools/create_enum.js';
+import { deleteEnumTool } from './tools/delete_enum.js';
+import { addEnumValueTool } from './tools/add_enum_value.js';
+
+// Triggers
+import { listTriggersTool } from './tools/list_triggers.js';
+import { createTriggerTool } from './tools/create_trigger.js';
+import { deleteTriggerTool } from './tools/delete_trigger.js';
+
+// Views
+import { listViewsTool } from './tools/list_views.js';
+import { createViewTool } from './tools/create_view.js';
+import { deleteViewTool } from './tools/delete_view.js';
+import { refreshMaterializedViewTool } from './tools/refresh_materialized_view.js';
+
+// Indexes
+import { listIndexesTool } from './tools/list_indexes.js';
+import { createIndexTool } from './tools/create_index.js';
+import { deleteIndexTool } from './tools/delete_index.js';
+
+// Types
+import { listTypesTool } from './tools/list_types.js';
+import { createTypeTool } from './tools/create_type.js';
+import { deleteTypeTool } from './tools/delete_type.js';
+
+// Foreign Keys
+import { listForeignKeysTool } from './tools/list_foreign_keys.js';
+import { createForeignKeyTool } from './tools/create_foreign_key.js';
+import { deleteForeignKeyTool } from './tools/delete_foreign_key.js';
+
+// Sequences
+import { listSequencesTool } from './tools/list_sequences.js';
+import { createSequenceTool } from './tools/create_sequence.js';
+import { deleteSequenceTool } from './tools/delete_sequence.js';
+
+// Schemas
+import { listSchemasTool } from './tools/list_schemas.js';
+import { createSchemaTool } from './tools/create_schema.js';
+import { deleteSchemaTool } from './tools/delete_schema.js';
+
+// Tables
+import { createTableTool } from './tools/create_table.js';
+import { deleteTableTool } from './tools/delete_table.js';
+import { renameTableTool } from './tools/rename_table.js';
+
+// Columns
+import { listColumnsTool } from './tools/list_columns.js';
+import { addColumnTool } from './tools/add_column.js';
+import { alterColumnTool } from './tools/alter_column.js';
+import { dropColumnTool } from './tools/drop_column.js';
+
+// Constraints
+import { listConstraintsTool } from './tools/list_constraints.js';
+import { createConstraintTool } from './tools/create_constraint.js';
+import { deleteConstraintTool } from './tools/delete_constraint.js';
+
+// Roles & Permissions
+import { listRolesTool } from './tools/list_roles.js';
+import { grantPermissionTool } from './tools/grant_permission.js';
+import { revokePermissionTool } from './tools/revoke_permission.js';
+
+// Extensions
+import { enableExtensionTool } from './tools/enable_extension.js';
+import { disableExtensionTool } from './tools/disable_extension.js';
+
+// Table Stats & Maintenance
+import { getTableStatsTool } from './tools/get_table_stats.js';
+import { vacuumTableTool } from './tools/vacuum_table.js';
+import { analyzeTableTool } from './tools/analyze_table.js';
+
+// Comments
+import { setCommentTool } from './tools/set_comment.js';
+
+// Realtime
+import { enableRealtimeTool } from './tools/enable_realtime.js';
+import { disableRealtimeTool } from './tools/disable_realtime.js';
+
+// Storage Buckets
+import { createBucketTool } from './tools/create_bucket.js';
+import { deleteBucketTool } from './tools/delete_bucket.js';
+import { updateBucketTool } from './tools/update_bucket.js';
+
 // Express for SSE mode
 import express from 'express';
 import cors from 'cors';
@@ -211,6 +307,83 @@ async function main() {
             [listStorageBucketsTool.name]: listStorageBucketsTool as AppTool,
             [listStorageObjectsTool.name]: listStorageObjectsTool as AppTool,
             [listRealtimePublicationsTool.name]: listRealtimePublicationsTool as AppTool,
+            // Functions (RPC)
+            [listFunctionsTool.name]: listFunctionsTool as AppTool,
+            [createFunctionTool.name]: createFunctionTool as AppTool,
+            [deleteFunctionTool.name]: deleteFunctionTool as AppTool,
+            // RLS Policies
+            [listPoliciesTool.name]: listPoliciesTool as AppTool,
+            [createPolicyTool.name]: createPolicyTool as AppTool,
+            [deletePolicyTool.name]: deletePolicyTool as AppTool,
+            [enableRlsTool.name]: enableRlsTool as AppTool,
+            [disableRlsTool.name]: disableRlsTool as AppTool,
+            // Enums
+            [listEnumsTool.name]: listEnumsTool as AppTool,
+            [createEnumTool.name]: createEnumTool as AppTool,
+            [deleteEnumTool.name]: deleteEnumTool as AppTool,
+            [addEnumValueTool.name]: addEnumValueTool as AppTool,
+            // Triggers
+            [listTriggersTool.name]: listTriggersTool as AppTool,
+            [createTriggerTool.name]: createTriggerTool as AppTool,
+            [deleteTriggerTool.name]: deleteTriggerTool as AppTool,
+            // Views
+            [listViewsTool.name]: listViewsTool as AppTool,
+            [createViewTool.name]: createViewTool as AppTool,
+            [deleteViewTool.name]: deleteViewTool as AppTool,
+            [refreshMaterializedViewTool.name]: refreshMaterializedViewTool as AppTool,
+            // Indexes
+            [listIndexesTool.name]: listIndexesTool as AppTool,
+            [createIndexTool.name]: createIndexTool as AppTool,
+            [deleteIndexTool.name]: deleteIndexTool as AppTool,
+            // Types
+            [listTypesTool.name]: listTypesTool as AppTool,
+            [createTypeTool.name]: createTypeTool as AppTool,
+            [deleteTypeTool.name]: deleteTypeTool as AppTool,
+            // Foreign Keys
+            [listForeignKeysTool.name]: listForeignKeysTool as AppTool,
+            [createForeignKeyTool.name]: createForeignKeyTool as AppTool,
+            [deleteForeignKeyTool.name]: deleteForeignKeyTool as AppTool,
+            // Sequences
+            [listSequencesTool.name]: listSequencesTool as AppTool,
+            [createSequenceTool.name]: createSequenceTool as AppTool,
+            [deleteSequenceTool.name]: deleteSequenceTool as AppTool,
+            // Schemas
+            [listSchemasTool.name]: listSchemasTool as AppTool,
+            [createSchemaTool.name]: createSchemaTool as AppTool,
+            [deleteSchemaTool.name]: deleteSchemaTool as AppTool,
+            // Tables
+            [createTableTool.name]: createTableTool as AppTool,
+            [deleteTableTool.name]: deleteTableTool as AppTool,
+            [renameTableTool.name]: renameTableTool as AppTool,
+            // Columns
+            [listColumnsTool.name]: listColumnsTool as AppTool,
+            [addColumnTool.name]: addColumnTool as AppTool,
+            [alterColumnTool.name]: alterColumnTool as AppTool,
+            [dropColumnTool.name]: dropColumnTool as AppTool,
+            // Constraints
+            [listConstraintsTool.name]: listConstraintsTool as AppTool,
+            [createConstraintTool.name]: createConstraintTool as AppTool,
+            [deleteConstraintTool.name]: deleteConstraintTool as AppTool,
+            // Roles & Permissions
+            [listRolesTool.name]: listRolesTool as AppTool,
+            [grantPermissionTool.name]: grantPermissionTool as AppTool,
+            [revokePermissionTool.name]: revokePermissionTool as AppTool,
+            // Extensions
+            [enableExtensionTool.name]: enableExtensionTool as AppTool,
+            [disableExtensionTool.name]: disableExtensionTool as AppTool,
+            // Table Stats & Maintenance
+            [getTableStatsTool.name]: getTableStatsTool as AppTool,
+            [vacuumTableTool.name]: vacuumTableTool as AppTool,
+            [analyzeTableTool.name]: analyzeTableTool as AppTool,
+            // Comments
+            [setCommentTool.name]: setCommentTool as AppTool,
+            // Realtime
+            [enableRealtimeTool.name]: enableRealtimeTool as AppTool,
+            [disableRealtimeTool.name]: disableRealtimeTool as AppTool,
+            // Storage Buckets
+            [createBucketTool.name]: createBucketTool as AppTool,
+            [deleteBucketTool.name]: deleteBucketTool as AppTool,
+            [updateBucketTool.name]: updateBucketTool as AppTool,
         };
 
         // Tool filtering logic
